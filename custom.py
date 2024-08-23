@@ -69,7 +69,7 @@ executor = ThreadPoolExecutor()
 
 
 async def create_thread():
-    """Crear un nuevo hilo de OpenAI de forma asíncrona"""
+    """Create a new OpenAI thread asynchronously by running synchronous code in an executor."""
     loop = asyncio.get_running_loop()
     try:
         my_thread = await loop.run_in_executor(executor, client.beta.threads.create)
@@ -83,36 +83,21 @@ async def get_assistant_response(thread_id, user_message=None, image_url=None):
     """Enviar un mensaje (texto + imagen) al asistente de OpenAI y devolver la respuesta"""
     loop = asyncio.get_running_loop()
     try:
-        content = []
-
-        # Agregar el texto si el usuario lo proporciona
-        if user_message:
-            content.append({"type": "text", "text": user_message})
-
-        # Agregar la imagen si existe
-        if image_url:
-            content.append({"type": "image_url", "image_url": {"url": image_url}})
-
-        # Asegurarse de que hay contenido antes de enviar
-        if not content:
-            console.print("No hay contenido para enviar al asistente.", style="bold red")
-            return ["No se detectó texto ni imagen para procesar."]
-
-        # Enviar mensaje al asistente
+        # Add user message to the thread using an executor for synchronous calls
         await loop.run_in_executor(executor, lambda: client.beta.threads.messages.create(
             thread_id=thread_id,
             role="user",
-            content=content
+            content=user_message
         ))
 
-        # Ejecutar el asistente con instrucciones para que solo responda la pregunta
+        # Run the assistant
         my_run = await loop.run_in_executor(executor, lambda: client.beta.threads.runs.create(
             thread_id=thread_id,
             assistant_id=assistant_id,
-            instructions="Responde únicamente la pregunta presente en la imagen o en el texto, sin agregar información extra."
+            instructions="Reply in Spanish."
         ))
 
-        # Esperar respuesta
+        # Wait for the run to complete
         while True:
             run_status = await loop.run_in_executor(executor, lambda: client.beta.threads.runs.retrieve(
                 thread_id=thread_id,
@@ -122,24 +107,27 @@ async def get_assistant_response(thread_id, user_message=None, image_url=None):
                 break
             await asyncio.sleep(1)
 
-        # Obtener la respuesta
-        all_messages = await loop.run_in_executor(executor, lambda: client.beta.threads.messages.list(thread_id=thread_id))
+        # Retrieve the messages added by the assistant to the thread
+        all_messages = await loop.run_in_executor(executor,
+                                                  lambda: client.beta.threads.messages.list(thread_id=thread_id))
         responses = []
 
+        console.print(all_messages.data)
+
         latest_message_time = max(
-            msg.created_at for msg in all_messages.data if msg.role == 'assistant')
+            msg.created_at for msg in all_messages.data if msg.role == 'assistant')  # Get latest time
 
         for message in all_messages.data:
-            if message.role == 'assistant' and message.created_at == latest_message_time:
+            if message.role == 'assistant' and message.created_at == latest_message_time:  # Filter for the latest assistant message only
                 for content_block in message.content:
                     if isinstance(content_block, TextContentBlock):
+                        print("------------------------------------- RESPONSE", content_block.text.value)
                         responses.append(content_block.text.value)
 
         return responses
     except Exception as e:
         console.print(f"Failed to get response: {e}", style="bold red")
         return ["Error al obtener respuesta del asistente."]
-
 
 async def process_text_with_gpt(user_message):
     """Procesar mensaje de texto directamente con GPT-4."""
@@ -241,7 +229,7 @@ async def handle_message(update: Update, context: CallbackContext):
         if thread_id:
             context.user_data['thread_id'] = thread_id
         else:
-            await update.message.reply_text('Error iniciando la conversación con el asistente.')
+            await update.message.reply_text('Error initializing conversation with assistant.')
             return
 
     # Intentar primero con el asistente de OpenAI
@@ -265,7 +253,7 @@ async def handle_message(update: Update, context: CallbackContext):
 
     collection.insert_one(conversation_data)
 
-    # Send response back to Telegram
+    # Format each part of the response before sending
     formatted_responses = [format_message(text) for text in response]
     for text in formatted_responses:
         await update.message.reply_text(text)
@@ -361,14 +349,14 @@ async def start(update: Update, context: CallbackContext):
 
 
 def main():
-    """Función principal para ejecutar el bot"""
+    """Main function to run the Telegram bot."""
     TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Agregar handlers para comandos y mensajes
+    # Add handlers for commands and messages
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))  # Añadir handler para fotos
 
     application.run_polling()
 
