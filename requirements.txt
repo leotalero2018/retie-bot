@@ -1,4 +1,4 @@
 rich
 python-dotenv
 openai
-telegram
+python-telegram-bot

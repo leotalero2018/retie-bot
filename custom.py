@@ -72,71 +72,22 @@ async def get_assistant_response(thread_id, user_message):
 
         console.print(all_messages.data)
 
+        latest_message_time = max(
+            msg.created_at for msg in all_messages.data if msg.role == 'assistant')  # Get latest time
+
         for message in all_messages.data:
-            # Each message can contain multiple content blocks
-            for content_block in message.content:
-                if isinstance(content_block, TextContentBlock):  # Check if the content block is a TextContentBlock
-                    # Extract the text value and append to the responses list
-                    responses.append(content_block.text.value)
+            if message.role == 'assistant' and message.created_at == latest_message_time:  # Filter for the latest assistant message only
+                for content_block in message.content:
+                    if isinstance(content_block, TextContentBlock):
+                        print("------------------------------------- RESPONSE", content_block.text.value)
+                        responses.append(content_block.text.value)
 
-        return responses  # Return a list of text values from all content blocks
-
+        return responses
     except Exception as e:
         console.print(f"Failed to get response: {e}", style="bold red")
         return "An error occurred while getting a response from the assistant."
 
 
-# Loop until the user enters "quit"
-# while True:
-#     # Get user input
-#     user_input = input("User: ")
-#
-#     # Check if the user wants to quit
-#     if user_input.lower() == "quit":
-#         console.print("\nAssistant: Have a nice day! :wave:", style="black on white")
-#         break
-#
-#     # Add user message to the thread
-#     my_thread_message = client.beta.threads.messages.create(
-#         thread_id=my_thread.id,
-#         role="user",
-#         content=user_input
-#
-#     )
-#
-#     # Run the assistant
-#     my_run = client.beta.threads.runs.create(
-#         thread_id=my_thread.id,
-#         assistant_id=assistant_id,
-#         instructions="Contestar en español."
-#     )
-#
-#     # Initial delay before the first retrieval
-#     time.sleep(15)
-#
-#     # Periodically retrieve the run to check its status
-#     while my_run.status in ["queued", "in_progress"]:
-#         keep_retrieving_run = client.beta.threads.runs.retrieve(
-#             thread_id=my_thread.id,
-#             run_id=my_run.id
-#         )
-#
-#         if keep_retrieving_run.status == "completed":
-#             # Retrieve the messages added by the assistant to the thread
-#             all_messages = client.beta.threads.messages.list(
-#                 thread_id=my_thread.id
-#             )
-#
-#             # Display assistant message
-#             console.print(f"\nAssistant: {all_messages.data[0].content[0].text.value}\n", style="black on white")
-#
-#             break
-#         elif keep_retrieving_run.status in ["queued", "in_progress"]:
-#             # Delay before the next retrieval attempt
-#             time.sleep(5)
-#             pass
-#         else:
-#             break
 
 async def handle_message(update: Update, context: CallbackContext):
     user_message = update.message.text
