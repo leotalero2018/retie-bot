@@ -10,19 +10,27 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from openai.types.beta.threads.text_content_block import TextContentBlock
 import re
+from pymongo import MongoClient
 
-# Load environment variables from .env
+# Load environment variables
 load_dotenv()
 
 console = Console()
 
+# OpenAI API client
 client = OpenAI()
 OpenAI.api_key = os.getenv('OPENAI_API_KEY')
-
 assistant_id = os.getenv('OPENAI_ASSISTANT_ID')
 
-# Create a new thread
+# MongoDB Connection
+mongo_uri = os.getenv('MONGO_URI')
+client_mongo = MongoClient(mongo_uri, tls=True, tlsAllowInvalidCertificates=True)
+db = client_mongo["telegram_bot"]
+collection = db["conversations"]
+
+# Thread Executor
 executor = ThreadPoolExecutor()
+
 
 async def create_thread():
     """Create a new OpenAI thread asynchronously by running synchronous code in an executor."""
@@ -35,27 +43,22 @@ async def create_thread():
         return None
 
 
-#my_thread = client.beta.threads.create()
-
 async def get_assistant_response(thread_id, user_message):
     """Send user message to OpenAI and return the assistant's response asynchronously."""
     loop = asyncio.get_running_loop()
     try:
-        # Add user message to the thread using an executor for synchronous calls
         await loop.run_in_executor(executor, lambda: client.beta.threads.messages.create(
             thread_id=thread_id,
             role="user",
             content=user_message
         ))
 
-        # Run the assistant
         my_run = await loop.run_in_executor(executor, lambda: client.beta.threads.runs.create(
             thread_id=thread_id,
             assistant_id=assistant_id,
             instructions="Reply in Spanish."
         ))
 
-        # Wait for the run to complete
         while True:
             run_status = await loop.run_in_executor(executor, lambda: client.beta.threads.runs.retrieve(
                 thread_id=thread_id,
@@ -65,32 +68,32 @@ async def get_assistant_response(thread_id, user_message):
                 break
             await asyncio.sleep(1)
 
-        # Retrieve the messages added by the assistant to the thread
         all_messages = await loop.run_in_executor(executor,
                                                   lambda: client.beta.threads.messages.list(thread_id=thread_id))
         responses = []
 
-        console.print(all_messages.data)
-
         latest_message_time = max(
-            msg.created_at for msg in all_messages.data if msg.role == 'assistant')  # Get latest time
+            msg.created_at for msg in all_messages.data if msg.role == 'assistant')
 
         for message in all_messages.data:
-            if message.role == 'assistant' and message.created_at == latest_message_time:  # Filter for the latest assistant message only
+            if message.role == 'assistant' and message.created_at == latest_message_time:
                 for content_block in message.content:
                     if isinstance(content_block, TextContentBlock):
-                        print("------------------------------------- RESPONSE", content_block.text.value)
                         responses.append(content_block.text.value)
 
         return responses
     except Exception as e:
         console.print(f"Failed to get response: {e}", style="bold red")
-        return "An error occurred while getting a response from the assistant."
-
+        return ["An error occurred while getting a response from the assistant."]
 
 
 async def handle_message(update: Update, context: CallbackContext):
+    """Handle incoming messages from users."""
     user_message = update.message.text
+    user_id = update.message.from_user.id
+    user_name = update.message.from_user.username
+    chat_id = update.message.chat_id
+    timestamp = update.message.date
     thread_id = context.user_data.get('thread_id')
 
     if not thread_id:
@@ -103,39 +106,49 @@ async def handle_message(update: Update, context: CallbackContext):
 
     response = await get_assistant_response(thread_id, user_message)
 
-    # Format each part of the response before sending
+    # Save conversation to MongoDB
+    conversation_data = {
+        "user_id": user_id,
+        "username": user_name,
+        "chat_id": chat_id,
+        "thread_id": thread_id,
+        "timestamp": timestamp,
+        "user_message": user_message,
+        "bot_responses": response
+    }
+
+    collection.insert_one(conversation_data)
+
+    # Send response back to Telegram
     formatted_responses = [format_message(text) for text in response]
     for text in formatted_responses:
         await update.message.reply_text(text)
 
 
 def format_message(text):
-    # Replace Unicode escape sequences with actual Unicode characters
+    """Format the response text before sending."""
     text = text.encode('utf-8').decode('utf-8')
-
-    # Optional: Remove source citations or other unwanted parts of the text
     text = re.sub(r'【[\d:†source\】]+', '', text)
-
-    # Ensure newline characters are handled correctly (usually they are, this is just for completeness)
     text = text.replace('\\n', '\n')
-
     return text
 
 
 async def start(update: Update, context: CallbackContext):
-    """Start command for Telegram bot."""
+    """Start command for the Telegram bot."""
     await update.message.reply_text('Hola, puedes enviar tus dudas sobre RETIE')
+
 
 def main():
     """Main function to run the Telegram bot."""
     TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Add handlers for commands and messages
+    # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     application.run_polling()
+
 
 if __name__ == '__main__':
     main()
