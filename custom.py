@@ -11,7 +11,8 @@ from concurrent.futures import ThreadPoolExecutor
 from openai.types.beta.threads.text_content_block import TextContentBlock
 import re
 from minio import Minio
-
+from datetime import timedelta
+import base64
 
 # Load environment variables from .env
 load_dotenv()
@@ -23,27 +24,35 @@ OpenAI.api_key = os.getenv('OPENAI_API_KEY')
 
 assistant_id = os.getenv('OPENAI_ASSISTANT_ID')
 
-MINIO_ENDPOINT = "localhost:9000"
-MINIO_ACCESS_KEY = "admin"
-MINIO_SECRET_KEY = "admin123"
+# Configuración de MinIO en Railway
+MINIO_ENDPOINT = "bucket-production-fabf.up.railway.app"
+MINIO_ACCESS_KEY = os.getenv("MINIO_ROOT_USER")
+MINIO_SECRET_KEY = os.getenv("MINIO_ROOT_PASSWORD")
 BUCKET_NAME = "telegram-bot-images"
+MINIO_PORT = 443
 
 minio_client = Minio(
     MINIO_ENDPOINT,
     access_key=MINIO_ACCESS_KEY,
     secret_key=MINIO_SECRET_KEY,
-    secure=False  # Change to True if using HTTPS
+    secure=True  # Railway usa HTTPS
 )
 
-# Ensure the bucket exists
+# Verificar conexión
+print("Conectado a MinIO en Railway.")
+
+# Asegurar que el bucket existe
 if not minio_client.bucket_exists(BUCKET_NAME):
     minio_client.make_bucket(BUCKET_NAME)
+    print(f"Bucket {BUCKET_NAME} creado.")
+else:
+    print(f"El bucket {BUCKET_NAME} ya existe.")
 
-# Create a new thread
+# Crear un nuevo thread
 executor = ThreadPoolExecutor()
 
 async def create_thread():
-    """Create a new OpenAI thread asynchronously by running synchronous code in an executor."""
+    """Crear un nuevo hilo de OpenAI de forma asíncrona"""
     loop = asyncio.get_running_loop()
     try:
         my_thread = await loop.run_in_executor(executor, client.beta.threads.create)
@@ -52,60 +61,50 @@ async def create_thread():
         console.print(f"Failed to create thread: {e}", style="bold red")
         return None
 
-
-#my_thread = client.beta.threads.create()
-
-async def get_assistant_response(thread_id, user_message):
-    """Send user message to OpenAI and return the assistant's response asynchronously."""
-    loop = asyncio.get_running_loop()
+async def get_assistant_response_with_image(image_url):
+    """Enviar una imagen a OpenAI usando `image_url`."""
     try:
-        # Add user message to the thread using an executor for synchronous calls
-        await loop.run_in_executor(executor, lambda: client.beta.threads.messages.create(
-            thread_id=thread_id,
-            role="user",
-            content=user_message
-        ))
-
-        # Run the assistant
-        my_run = await loop.run_in_executor(executor, lambda: client.beta.threads.runs.create(
-            thread_id=thread_id,
-            assistant_id=assistant_id,
-            instructions="Reply in Spanish."
-        ))
-
-        # Wait for the run to complete
-        while True:
-            run_status = await loop.run_in_executor(executor, lambda: client.beta.threads.runs.retrieve(
-                thread_id=thread_id,
-                run_id=my_run.id
-            ))
-            if run_status.status == "completed":
-                break
-            await asyncio.sleep(1)
-
-        # Retrieve the messages added by the assistant to the thread
-        all_messages = await loop.run_in_executor(executor,
-                                                  lambda: client.beta.threads.messages.list(thread_id=thread_id))
-        responses = []
-
-        console.print(all_messages.data)
-
-        latest_message_time = max(
-            msg.created_at for msg in all_messages.data if msg.role == 'assistant')  # Get latest time
-
-        for message in all_messages.data:
-            if message.role == 'assistant' and message.created_at == latest_message_time:  # Filter for the latest assistant message only
-                for content_block in message.content:
-                    if isinstance(content_block, TextContentBlock):
-                        print("------------------------------------- RESPONSE", content_block.text.value)
-                        responses.append(content_block.text.value)
-
-        return responses
+        response = client.chat.completions.create(
+            model="gpt-4-vision-preview",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Analiza esta imagen y dime qué contiene."},
+                        {"type": "image_url", "image_url": image_url}
+                    ]
+                }
+            ],
+            max_tokens=300
+        )
+        return [response.choices[0].message.content]
     except Exception as e:
-        console.print(f"Failed to get response: {e}", style="bold red")
-        return "An error occurred while getting a response from the assistant."
+        logger.error(f"Error al procesar la imagen con OpenAI usando URL: {e}")
+        return None  # Retorna None si falla
 
+async def get_assistant_response_with_base64(local_file_path):
+    """Enviar una imagen en formato Base64 a OpenAI."""
+    try:
+        with open(local_file_path, "rb") as image_file:
+            base64_image = base64.b64encode(image_file.read()).decode("utf-8")
 
+        response = client.chat.completions.create(
+            model="gpt-4-vision-preview",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Analiza esta imagen y dime qué contiene."},
+                        {"type": "image_base64", "image_base64": base64_image}
+                    ]
+                }
+            ],
+            max_tokens=300
+        )
+        return [response.choices[0].message.content]
+    except Exception as e:
+        logger.error(f"Error al procesar la imagen con OpenAI usando Base64: {e}")
+        return ["Hubo un error al procesar la imagen."]
 
 async def handle_message(update: Update, context: CallbackContext):
     user_message = update.message.text
@@ -116,44 +115,76 @@ async def handle_message(update: Update, context: CallbackContext):
         if thread_id:
             context.user_data['thread_id'] = thread_id
         else:
-            await update.message.reply_text('Error initializing conversation with assistant.')
+            await update.message.reply_text('Error iniciando la conversación con el asistente.')
             return
 
-    response = await get_assistant_response(thread_id, user_message)
+    response = await get_assistant_response_with_image(user_message)
 
-    # Format each part of the response before sending
-    formatted_responses = [format_message(text) for text in response]
-    for text in formatted_responses:
+    for text in response:
         await update.message.reply_text(text)
 
+async def handle_photo(update: Update, context: CallbackContext):
+    """Manejar imágenes, subirlas a MinIO y obtener respuesta del asistente."""
+    logger.info("Recibí una imagen del usuario.")
 
-def format_message(text):
-    # Replace Unicode escape sequences with actual Unicode characters
-    text = text.encode('utf-8').decode('utf-8')
+    try:
+        photo = update.message.photo[-1]  # Tomar la imagen con mejor resolución
+        file = await context.bot.get_file(photo.file_id)
+        local_file_path = f"downloads/{photo.file_id}.jpg"
 
-    # Optional: Remove source citations or other unwanted parts of the text
-    text = re.sub(r'【[\d:†source\】]+', '', text)
+        os.makedirs("downloads", exist_ok=True)
 
-    # Ensure newline characters are handled correctly (usually they are, this is just for completeness)
-    text = text.replace('\\n', '\n')
+        # Descargar la imagen
+        await file.download_to_drive(local_file_path)
+        logger.info(f"Imagen guardada en {local_file_path}")
 
-    return text
+        # Subir a MinIO
+        minio_object_name = f"images/{photo.file_id}.jpg"
+        minio_client.fput_object(BUCKET_NAME, minio_object_name, local_file_path)
 
+        # Generar URL firmada para acceso
+        image_url = minio_client.presigned_get_object(BUCKET_NAME, minio_object_name, expires=timedelta(days=7))
+        logger.info(f"Imagen subida a MinIO: {image_url}")
+
+        # Obtener el thread del usuario o crear uno nuevo
+        thread_id = context.user_data.get('thread_id')
+
+        if not thread_id:
+            thread_id = await create_thread()
+            if thread_id:
+                context.user_data['thread_id'] = thread_id
+            else:
+                await update.message.reply_text("Error iniciando la conversación con el asistente.")
+                return
+
+        # Intentar enviar la imagen con URL
+        response = await get_assistant_response_with_image(image_url)
+
+        if response is None:
+            logger.info("La URL de MinIO no fue aceptada, probando con Base64.")
+            response = await get_assistant_response_with_base64(local_file_path)
+
+        # Enviar la respuesta del asistente al usuario
+        for text in response:
+            await update.message.reply_text(text)
+
+    except Exception as e:
+        logger.error(f"Error al manejar la imagen: {e}")
+        await update.message.reply_text("Hubo un error al procesar la imagen.")
 
 async def start(update: Update, context: CallbackContext):
-    """Start command for Telegram bot."""
-    await update.message.reply_text('Hola, puedes enviar tus dudas sobre RETIE')
+    """Comando /start del bot"""
+    await update.message.reply_text('Hola, puedes enviar tus dudas o imágenes para análisis.')
 
 def main():
-    """Main function to run the Telegram bot."""
+    """Función principal para ejecutar el bot"""
     TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Add handlers for commands and messages
+    # Agregar handlers para comandos y mensajes
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
     application.run_polling()
 
@@ -163,71 +194,6 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
-
-
-async def handle_photo(update: Update, context: CallbackContext):
-    """Handle receiving photos from users and upload to MinIO."""
-    logger.info("Received a photo from user.")
-
-    try:
-        photo = update.message.photo[-1]  # Get highest resolution photo
-        file = await context.bot.get_file(photo.file_id)
-        local_file_path = f"downloads/{photo.file_id}.jpg"
-
-        # Ensure the downloads directory exists
-        os.makedirs("downloads", exist_ok=True)
-
-        # Download the file
-        await file.download_to_drive(local_file_path)
-        logger.info(f"Photo saved to {local_file_path}")
-
-        # Upload to MinIO
-        minio_object_name = f"images/{photo.file_id}.jpg"
-        minio_client.fput_object(BUCKET_NAME, minio_object_name, local_file_path)
-
-        # Generate public URL
-        image_url = f"http://{MINIO_ENDPOINT}/{BUCKET_NAME}/{minio_object_name}"
-        logger.info(f"Uploaded to MinIO: {image_url}")
-
-        await update.message.reply_text(f"Imagen subida a MinIO: {image_url}")
-
-    except Exception as e:
-        logger.error(f"Error handling photo: {e}")
-        await update.message.reply_text("Hubo un error al procesar la imagen.")
-
-
-async def handle_document(update: Update, context: CallbackContext):
-    """Handle receiving image documents and upload to MinIO."""
-    logger.info("Received a document from user.")
-
-    try:
-        if update.message.document.mime_type.startswith("image/"):  # Ensure it's an image
-            file = await context.bot.get_file(update.message.document.file_id)
-            local_file_path = f"downloads/{update.message.document.file_name}"
-
-            # Ensure the downloads directory exists
-            os.makedirs("downloads", exist_ok=True)
-
-            # Download the file
-            await file.download_to_drive(local_file_path)
-            logger.info(f"Document (image) saved to {local_file_path}")
-
-            # Upload to MinIO
-            minio_object_name = f"images/{update.message.document.file_name}"
-            minio_client.fput_object(BUCKET_NAME, minio_object_name, local_file_path)
-
-            # Generate public URL
-            image_url = f"http://{MINIO_ENDPOINT}/{BUCKET_NAME}/{minio_object_name}"
-            logger.info(f"Uploaded to MinIO: {image_url}")
-
-            await update.message.reply_text(f"Imagen subida a MinIO: {image_url}")
-        else:
-            await update.message.reply_text("Este documento no parece ser una imagen.")
-
-    except Exception as e:
-        logger.error(f"Error handling document: {e}")
-        await update.message.reply_text("Hubo un error al procesar la imagen.")
-
 
 if __name__ == '__main__':
     main()
