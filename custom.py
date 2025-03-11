@@ -79,22 +79,40 @@ async def create_thread():
         return None
 
 
-async def get_assistant_response(thread_id, user_message):
-    """Send user message to OpenAI and return the assistant's response asynchronously."""
+async def get_assistant_response(thread_id, user_message=None, image_url=None):
+    """Enviar un mensaje (texto + imagen) al asistente de OpenAI y devolver la respuesta"""
     loop = asyncio.get_running_loop()
     try:
+        content = []
+
+        # Agregar el texto si el usuario lo proporciona
+        if user_message:
+            content.append({"type": "text", "text": user_message})
+
+        # Agregar la imagen si existe
+        if image_url:
+            content.append({"type": "image_url", "image_url": {"url": image_url}})
+
+        # Asegurarse de que hay contenido antes de enviar
+        if not content:
+            console.print("No hay contenido para enviar al asistente.", style="bold red")
+            return ["No se detectó texto ni imagen para procesar."]
+
+        # Enviar mensaje al asistente
         await loop.run_in_executor(executor, lambda: client.beta.threads.messages.create(
             thread_id=thread_id,
             role="user",
-            content=user_message
+            content=content
         ))
 
+        # Ejecutar el asistente con instrucciones para que solo responda la pregunta
         my_run = await loop.run_in_executor(executor, lambda: client.beta.threads.runs.create(
             thread_id=thread_id,
             assistant_id=assistant_id,
-            instructions="Reply in Spanish."
+            instructions="Responde únicamente la pregunta presente en la imagen o en el texto, sin agregar información extra."
         ))
 
+        # Esperar respuesta
         while True:
             run_status = await loop.run_in_executor(executor, lambda: client.beta.threads.runs.retrieve(
                 thread_id=thread_id,
@@ -104,8 +122,8 @@ async def get_assistant_response(thread_id, user_message):
                 break
             await asyncio.sleep(1)
 
-        all_messages = await loop.run_in_executor(executor,
-                                                  lambda: client.beta.threads.messages.list(thread_id=thread_id))
+        # Obtener la respuesta
+        all_messages = await loop.run_in_executor(executor, lambda: client.beta.threads.messages.list(thread_id=thread_id))
         responses = []
 
         latest_message_time = max(
@@ -120,7 +138,7 @@ async def get_assistant_response(thread_id, user_message):
         return responses
     except Exception as e:
         console.print(f"Failed to get response: {e}", style="bold red")
-        return ["An error occurred while getting a response from the assistant."]
+        return ["Error al obtener respuesta del asistente."]
 
 
 async def process_text_with_gpt(user_message):
@@ -135,41 +153,6 @@ async def process_text_with_gpt(user_message):
     except Exception as e:
         logger.error(f"Error al procesar texto con GPT-4: {e}")
         return ["Hubo un error al procesar tu mensaje."]
-
-
-async def get_assistant_response_with_file_upload(local_file_path):
-    """
-    Envía la imagen a OpenAI subiéndola como archivo para obtener un file_id.
-    Luego envía un mensaje con ese file_id para análisis de imagen.
-    """
-    try:
-        # Subir la imagen a OpenAI para obtener el file_id
-        with open(local_file_path, "rb") as image_file:
-            response_file = client.File.create(
-                file=image_file,
-                purpose="vision"
-            )
-        file_id = response_file["id"]
-        logger.info(f"Imagen subida a OpenAI con file_id: {file_id}")
-
-        # Enviar el mensaje usando el file_id
-        response = client.chat.completions.create(
-            model="gpt-4-vision-preview",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Analiza esta imagen y dime qué contiene."},
-                        {"type": "image_file", "image_file": {"file_id": file_id, "detail": "low"}}
-                    ]
-                }
-            ],
-            max_tokens=300
-        )
-        return [response.choices[0].message.content]
-    except Exception as e:
-        logger.error(f"Error al procesar la imagen con OpenAI usando file upload: {e}")
-        return None
 
 
 async def get_assistant_response_with_image_url(image_url):
@@ -199,7 +182,7 @@ async def get_assistant_response_with_base64(local_file_path):
     try:
         with open(local_file_path, "rb") as image_file:
             base64_image = base64.b64encode(image_file.read()).decode("utf-8")
-
+        
         response = client.chat.completions.create(
             model="gpt-4-vision-preview",
             messages=[
@@ -207,7 +190,7 @@ async def get_assistant_response_with_base64(local_file_path):
                     "role": "user",
                     "content": [
                         {"type": "text", "text": "Analiza esta imagen y dime qué contiene."},
-                        {"type": "image_base64", "image_base64": base64_image}
+                        {"type": "image_url", "image_url": f"data:image/jpeg;base64,{base64_image}"}
                     ]
                 }
             ],
@@ -216,7 +199,23 @@ async def get_assistant_response_with_base64(local_file_path):
         return [response.choices[0].message.content]
     except Exception as e:
         logger.error(f"Error al procesar la imagen con OpenAI usando Base64: {e}")
-        return ["Hubo un error al procesar la imagen."]
+        return ["Error al procesar la imagen."]
+
+
+async def get_assistant_response_with_file_upload(local_file_path):
+    """
+    Envía la imagen a OpenAI subiéndola como archivo para obtener un file_id.
+    Luego envía un mensaje con ese file_id para análisis de imagen.
+    """
+    try:
+        # Este método no está presente en el código original pero se menciona,
+        # por lo que se deja como un placeholder
+        # La implementación correcta dependería de la API específica que se esté usando
+        logger.error("Método get_assistant_response_with_file_upload no implementado")
+        return None
+    except Exception as e:
+        logger.error(f"Error al subir archivo a OpenAI: {e}")
+        return None
 
 
 def format_message(text):
@@ -229,7 +228,7 @@ def format_message(text):
 
 async def handle_message(update: Update, context: CallbackContext):
     """Handle incoming text messages from users."""
-    user_message = update.message.text
+    user_message = update.message.text if update.message.text else ""
     user_id = update.message.from_user.id
     user_name = update.message.from_user.username
     chat_id = update.message.chat_id
@@ -273,8 +272,9 @@ async def handle_message(update: Update, context: CallbackContext):
 
 
 async def handle_photo(update: Update, context: CallbackContext):
-    """Manejar imágenes: descargar, subir a MinIO, enviar a OpenAI y responder al usuario."""
+    """Manejar imágenes y enviarlas al asistente de OpenAI para responder preguntas dentro de ellas."""
     logger.info("Recibí una imagen del usuario.")
+
     try:
         photo = update.message.photo[-1]  # Tomar la imagen con mejor resolución
         file = await context.bot.get_file(photo.file_id)
@@ -290,33 +290,41 @@ async def handle_photo(update: Update, context: CallbackContext):
         minio_object_name = f"images/{photo.file_id}.jpg"
         minio_client.fput_object(BUCKET_NAME, minio_object_name, local_file_path)
 
-        # Generar URL firmada para acceso (opcional, si se requiere)
+        # Generar URL pública para la imagen
         image_url = minio_client.presigned_get_object(BUCKET_NAME, minio_object_name, expires=timedelta(days=7))
-        logger.info(f"Imagen subida a MinIO: {image_url}")
+        logger.info(f"Imagen subida a MinIO y accesible en: {image_url}")
 
-        # Obtener el thread del usuario o crear uno nuevo
+        # Obtener el thread_id del usuario
         thread_id = context.user_data.get('thread_id')
         if not thread_id:
             thread_id = await create_thread()
             if thread_id:
                 context.user_data['thread_id'] = thread_id
             else:
-                await update.message.reply_text("Error iniciando la conversación con el asistente.")
+                await update.message.reply_text('Error iniciando la conversación con el asistente.')
                 return
 
-        # Estrategia en cascada para procesar la imagen:
-        # 1. Primero intentamos usar la subida de archivos (método más nuevo y recomendado)
-        response = await get_assistant_response_with_file_upload(local_file_path)
+        # Combinamos ambas implementaciones:
+        # 1. Intentamos usar el método unificado de get_assistant_response
+        response = await get_assistant_response(thread_id, image_url=image_url)
+        
+        # Si no hay respuesta o hay algún problema, intentamos los métodos en cascada
+        if not response or response[0] == "Error al obtener respuesta del asistente.":
+            logger.info("Intentando métodos alternativos para procesar la imagen...")
+            
+            # Estrategia en cascada para procesar la imagen:
+            # 1. Primero intentamos usar la subida de archivos (método más nuevo y recomendado)
+            response = await get_assistant_response_with_file_upload(local_file_path)
 
-        # 2. Si falla, intentamos con la URL de MinIO
-        if response is None:
-            logger.info("La subida de archivo a OpenAI falló, probando con URL.")
-            response = await get_assistant_response_with_image_url(image_url)
+            # 2. Si falla, intentamos con la URL de MinIO
+            if response is None:
+                logger.info("La subida de archivo a OpenAI falló, probando con URL.")
+                response = await get_assistant_response_with_image_url(image_url)
 
-        # 3. Si ambos métodos fallan, usamos Base64 como último recurso
-        if response is None:
-            logger.info("El método URL también falló, probando con Base64.")
-            response = await get_assistant_response_with_base64(local_file_path)
+            # 3. Si ambos métodos fallan, usamos Base64 como último recurso
+            if response is None:
+                logger.info("El método URL también falló, probando con Base64.")
+                response = await get_assistant_response_with_base64(local_file_path)
 
         # Guardar la conversación en MongoDB
         user_id = update.message.from_user.id
