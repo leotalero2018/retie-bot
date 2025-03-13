@@ -15,6 +15,7 @@ from pymongo import MongoClient
 # Load environment variables
 load_dotenv()
 
+
 console = Console()
 
 # OpenAI API client
