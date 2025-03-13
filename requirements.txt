@@ -1,9 +1,6 @@
 rich
 python-dotenv
 openai
-<<<<<<< HEAD
-python-telegram-bot
-=======
 python-telegram-bot
 minio
->>>>>>> Minio
+
