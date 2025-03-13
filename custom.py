@@ -14,6 +14,7 @@ import re
 # Load environment variables from .env
 load_dotenv()
 
+
 console = Console()
 
 client = OpenAI()
