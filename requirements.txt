@@ -2,4 +2,4 @@ rich
 python-dotenv
 openai
 python-telegram-bot
-pymongo 
+pymongo
